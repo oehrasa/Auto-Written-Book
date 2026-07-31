@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-such silly program to convert .pdf literature into .txt format which then can be used for Book-Import module in AutoBookshelf addon,
+such silly program to convert .pdf literature into .txt format which then can be used for BookImporter module inside AutoBookshelf addon,
 why pdf you might ask? well this project is originally made for overlord lightnovel that i got from some random drive sharing.
-also thanks to A-kun for recomending rich library to me, so sorry if the code a bit too much, A-kun will be proud!!!!!!!
+also thanks to A-kun for recomending rich library to me, so sorry if the code a bit too much, its badly maintained.
 """
 from random import randint
 
