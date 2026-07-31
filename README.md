@@ -7,7 +7,7 @@
 
 ## Installation
 - Make sure to have python installed/configured !
-- Open terminal
+- Open up terminal
 
 - Clone this repository
 
@@ -34,7 +34,7 @@
 
 # Usage
 1. put our .pdf files into input_folder we created earlier
-2. run it using `python pdfcon.py` or just use vscode built-in 
+2. run it using `python pdfcon.py` or just use VsCode built-in 
 3. happy happy
 
 ## Dependencies
