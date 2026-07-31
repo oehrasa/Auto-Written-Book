@@ -6,7 +6,7 @@
 </div>
 
 ## Installation
-- Make sure the have python installed/configured !
+- Make sure to have python installed/configured !
 - Open terminal
 
 - Clone this repository
@@ -38,7 +38,7 @@
 3. happy happy
 
 ## Dependencies
-| Lib | Version |
+| Library | Version |
 |---|---|
 | Python | ≥ 3.8 |
 | rich | ≥ 13.0.0 |
