@@ -3,8 +3,16 @@
 such silly program to convert .pdf literature into .txt format which then can be used for BookImporter module inside AutoBookshelf addon,
 why pdf you might ask? well this project is originally made for overlord lightnovel that i got from some random drive sharing.
 also thanks to A-kun for recomending rich library to me, so sorry if the code a bit too much, its badly maintained.
+
+now also builds/publishes index.json so the BookImporter module can fetch the
+library remotely over GitHub Pages instead of needing the .txt files locally.
 """
+import json
+import os
+import subprocess
+import time
 from random import randint
+from urllib.parse import quote
 
 from rich import print
 from rich.highlighter import Highlighter
@@ -22,6 +30,29 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 input_folder = SCRIPT_DIR / "input_folder"
 list_of_item = []
 ENABLE_DECODING = False  # set True to enable auto-decoding or False & will skips decoding
+
+# --- Remote library (GitHub Pages) settings ---------------------------------
+# The converter script lives in its own repo (Auto-Written-Book). The .txt
+# output + index.json get written into a SEPARATE local clone of the
+# Ashurbanipal repo instead -- that's the one that gets pushed and served
+# over GitHub Pages (public repo). Point DATA_REPO_DIR at wherever you
+# cloned it, or set the ASHURBANIPAL_REPO env var to override without
+# editing this file.
+GITHUB_USER = "oehrasa"
+GITHUB_REPO = "Ashurbanipal"
+GITHUB_BRANCH = "main"
+GITHUB_PAGES_BASE = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}"
+DATA_REPO_DIR = Path(os.environ.get("ASHURBANIPAL_REPO", SCRIPT_DIR.parent / "Ashurbanipal")).resolve()
+MANIFEST_PATH = DATA_REPO_DIR / "index.json"
+
+def ensure_data_repo_exists():
+    """Fails loudly (instead of silently writing into the wrong place) if the data repo clone isn't where expected."""
+    if not DATA_REPO_DIR.exists():
+        console.log(f"[bold dark_red]Data repo not found at[/bold dark_red] [underline]{DATA_REPO_DIR}[/underline]")
+        console.log("[dim bright_black]Clone it first, e.g.:[/dim bright_black]")
+        console.log(f"[dim bright_black]  git clone https://github.com/{GITHUB_USER}/{GITHUB_REPO}.git {DATA_REPO_DIR}[/dim bright_black]")
+        console.log("[dim bright_black]...or set the ASHURBANIPAL_REPO env var to point at your existing clone.[/dim bright_black]")
+        quit()
 
 class RainbowHighlighter(Highlighter):
     def highlight(self, text):
@@ -352,6 +383,20 @@ def remove_gutenberg_boilerplate(text):
 
     return '\n'.join(lines).strip()
 
+def find_leftover_gutenberg_mentions(text):
+    """
+    Safety net for the boilerplate strip above. Gutenberg's license only
+    requires the header/footer AND every reference to the "Project
+    Gutenberg" name be removed before the text is unrestricted, this
+    catches anything remove_gutenberg_boilerplate() missed (nonstandard
+    footer formats, a stray "Produced by ... for Project Gutenberg" credit
+    line, etc.) so it can be reviewed before publishing instead of assumed.
+    Returns matching lines (empty list = clean).
+    """
+    if not text:
+        return []
+    return [line.strip() for line in text.splitlines() if "gutenberg" in line.lower()]
+
 def clean_text(text):
     """Clean and normalize extracted text."""
     if not text:
@@ -455,6 +500,61 @@ def get_pdf_group_name(pdf_name):
         return name
 
     return normalized
+
+def build_manifest(repo_root: Path) -> list[dict]:
+    """
+    Walks the group folders under repo_root and rebuilds the manifest from
+    what's actually on disk (rather than just what was converted this run),
+    so index.json always reflects the full library.
+    """
+    entries = []
+    for group_dir in sorted(p for p in repo_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
+        for txt_file in sorted(group_dir.glob("*.txt")):
+            relative = f"{group_dir.name}/{txt_file.name}"
+            url = f"{GITHUB_PAGES_BASE}/{quote(relative)}"
+            entries.append({
+                "group": group_dir.name,
+                "title": txt_file.stem,
+                "file": relative,
+                "url": url,
+            })
+    return entries
+
+def write_manifest(entries: list[dict]):
+    payload = {
+        "generated": int(time.time()),
+        "books": entries,
+    }
+    MANIFEST_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    console.log(f"[#aae965]Wrote manifest[/#aae965] with [#74c7ec]{len(entries)}[/#74c7ec] book(s) to [underline]{MANIFEST_PATH.name}[/underline]")
+
+def git_publish(repo_root: Path):
+    """Commits and pushes the new/changed .txt files and index.json. Best-effort -- prints and continues on failure."""
+    try:
+        subprocess.run(["git", "-C", str(repo_root), "add", "-A"], check=True)
+        commit_msg = f"Add/update books ({time.strftime('%Y-%m-%d %H:%M:%S')})"
+        result = subprocess.run(["git", "-C", str(repo_root), "commit", "-m", commit_msg], capture_output=True, text=True)
+        if result.returncode != 0 and "nothing to commit" not in result.stdout.lower():
+            console.log(f"[dim yellow]git commit:[/dim yellow] {result.stdout.strip()} {result.stderr.strip()}")
+            return
+        subprocess.run(["git", "-C", str(repo_root), "push", "origin", GITHUB_BRANCH], check=True)
+        console.log("[#aae965]Pushed to GitHub.[/#aae965] Pages will redeploy in a minute or two.")
+    except FileNotFoundError:
+        console.log("[dim dark_red]git is not installed or not on PATH -- push manually.[/dim dark_red]")
+    except subprocess.CalledProcessError as e:
+        console.log(f"[dim dark_red]git command failed:[/dim dark_red] {e}")
+
+def publish_to_github(repo_root: Path):
+    entries = build_manifest(repo_root)
+    write_manifest(entries)
+
+    choice = console.input("[#b5e3fb]Commit and push to GitHub now?[/#b5e3fb] ([bold #71bc18]Y[/bold #71bc18]/[#ffdb4f]N[/#ffdb4f]): ").strip().lower()
+    if choice == "y":
+        git_publish(repo_root)
+    else:
+        console.log("[dim bright_black]Skipped push -- run git add/commit/push manually when ready.[/dim bright_black]")
+
+# -----------------------------------------------------------------------------
 
 def convert_folder(input_dir, base_name=None):  # Make base_name optional
     pdf_files = sorted(
@@ -566,8 +666,8 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
         return
         
     for group_name, group_pdfs in groups.items():
-        output_path = Path(group_name)
-        output_path.mkdir(exist_ok=True)
+        output_path = DATA_REPO_DIR / group_name
+        output_path.mkdir(parents=True, exist_ok=True)
         print(f"\n[italic bright_black]Processing group[italic bright_black]: '[#eda90c]{group_name}[/#eda90c]' [#eceb4b]to Folder[#eceb4b]: [#df8ec1]{output_path}[/#df8ec1]")
         
         # Use the specific base_name for this group
@@ -587,6 +687,12 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
             cleaned_text = clean_text(extracted_text)
             final_text = limit_blank_lines(cleaned_text, max_blank=1)
 
+            leftover = find_leftover_gutenberg_mentions(final_text)
+            if leftover:
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time(s) after cleaning -- review before publishing:")
+                for line in leftover[:5]:
+                    console.log(f"  [dim]{line[:100]}[/dim]")
+
             with txt_path.open("w", encoding="utf-8") as f:
                 f.write(final_text)
 
@@ -597,11 +703,15 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
     console.log("[italic #ffa6c4]Conversion complete![/italic #ffa6c4]")
     print(rainbow("we are so barrack"))
 
+    # Rebuild the manifest and offer to publish it, now that new .txt files exist.
+    publish_to_github(DATA_REPO_DIR)
+
 console.save_html("fuckywucky.html")
 
 if __name__ == "__main__":
     input_folder = input_folder.resolve()
     print(Panel.fit(rainbow("Oehrasa")))
+    ensure_data_repo_exists()
     read_to_file()
     pdf_files = sorted(f for f in input_folder.iterdir() if f.suffix.lower() == ".pdf")
     todo_files = [f for f in pdf_files if f.name not in list_of_item]
