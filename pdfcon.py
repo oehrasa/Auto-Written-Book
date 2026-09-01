@@ -115,9 +115,15 @@ def read_to_file():
     except Exception as e:
        console.log(f"[dim dark_red]An error occurred while loading the file: [italic]{e}[/italic][/dim dark_red]")
 
-def get_base_name():
+def get_base_name(pdf_files=None):
+    if pdf_files:
+        print("\n[bold #74c7ec]This base name will be used for ALL of the following PDFs[/bold #74c7ec] [dim](one base name, auto-numbered per group)[/dim]:")
+        for pdf in pdf_files:
+            print(f"  [#FF8C42]-{pdf.name}[/#FF8C42]")
+        print()
+
     while True:
-        base_name = console.input(f"[bold][#C0392B]En[/#C0392B][#b87c5a]ter[/#b87c5a] [bright_black]the[/bright_black] [#a5479b]book[/#a5479b] [#d6d6d6]title for {group_name}[/#d6d6d6][/bold] ([#74c7ecD]22[/#74c7ecD] [italic][#FF006E]characters[/#FF006E][/italic] [bold][#f38ba8]max[/#f38ba8][/bold]): ").strip()
+        base_name = console.input(f"[bold][#C0392B]En[/#C0392B][#b87c5a]ter[/#b87c5a] [bright_black]the[/bright_black] [#a5479b]book[/#a5479b] [#d6d6d6]title for the PDFs listed above[/#d6d6d6][/bold] ([#74c7ecD]22[/#74c7ecD] [italic][#FF006E]characters[/#FF006E][/italic] [bold][#f38ba8]max[/#f38ba8][/bold]): ").strip()
         if not base_name:
             console.log("[italic red]Error: name cannot be[/italic red] [dim bright_black]empty[/dim bright_black]")
             continue
@@ -320,7 +326,8 @@ def pdf_to_text(pdf_path):
                         text += page_text + "\n\n"
             console.log(f"[#FFD93D]Used PyPDF2 fallback for[/#FFD93D] [olive]{pdf_path.name}[/olive]")
         except Exception as e2:
-            console.print_exception(f"All extraction methods failed: {e2}")
+            console.log(f"[bold dark_red]All extraction methods failed:[/bold dark_red] {e2}")
+            console.print_exception()
     
     return text
 
@@ -466,12 +473,7 @@ def limit_blank_lines(text, max_blank=1):
     
     return "\n".join(result_lines)
 
-def get_pdf_group_name(pdf_name):
-    """
-    Group by series name while avoiding per-volume numeric subfolders.
-    """
-    name = pdf_name.stem
-
+def derive_group_name(name: str) -> str:
     normalized = re.sub(r"[-_]+", " ", name).strip()
     normalized = re.sub(r"\s+", " ", normalized)
 
@@ -496,10 +498,11 @@ def get_pdf_group_name(pdf_name):
     if suffix_marker:
         normalized = f"{normalized} {suffix_marker}".strip()
 
-    if not normalized:
-        return name
+    return normalized or name
 
-    return normalized
+def get_pdf_group_name(pdf_name):
+    """Group PDFs by series name while avoiding per-volume numeric subfolders."""
+    return derive_group_name(pdf_name.stem)
 
 def build_manifest(repo_root: Path) -> list[dict]:
     """
@@ -526,7 +529,7 @@ def write_manifest(entries: list[dict]):
         "books": entries,
     }
     MANIFEST_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    console.log(f"[#aae965]Wrote manifest[/#aae965] with [#74c7ec]{len(entries)}[/#74c7ec] book(s) to [underline]{MANIFEST_PATH.name}[/underline]")
+    console.log(f"[#aae965]Wrote manifest[/#aae965] with [#74c7ec]{len(entries)}[/#74c7ec] books to [underline]{MANIFEST_PATH.name}[/underline]")
 
 def git_publish(repo_root: Path):
     """Commits and pushes the new/changed .txt files and index.json. Best-effort -- prints and continues on failure."""
@@ -552,9 +555,7 @@ def publish_to_github(repo_root: Path):
     if choice == "y":
         git_publish(repo_root)
     else:
-        console.log("[dim bright_black]Skipped push -- run git add/commit/push manually when ready.[/dim bright_black]")
-
-# -----------------------------------------------------------------------------
+        console.log("[dim bright_black]Skipped push, run git add/commit/push manually when ready.[/dim bright_black]")
 
 def convert_folder(input_dir, base_name=None):  # Make base_name optional
     pdf_files = sorted(
@@ -569,8 +570,13 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
         print(rainbow("its joever"))
         return
 
+    print("\n[bold #74c7ec]PDFs queued for this conversion run:[/bold #74c7ec]")
+    for pdf_file in todo_files:
+        print(f"  [#FF8C42]-{pdf_file.name}[/#FF8C42]")
+    print()
+
     groups = {}
-    custom_group = console.input("[#51CF66]Enter[/#51CF66] [#e85850]custom[/#e85850] [#cf2c2f]group name[/#cf2c2f] [bright_black]for all[/bright_black] [#FF8C42]PDFs[/#FF8C42] ([bright_yellow]X = exit, Enter = auto-detect[/bright_yellow]): ").strip()
+    custom_group = console.input("[#51CF66]Enter[/#51CF66] [#e85850]custom[/#e85850] [#cf2c2f]group name[/#cf2c2f] [bright_black]for all[/bright_black] [#FF8C42]PDFs[/#FF8C42] listed above ([bright_yellow]X = exit, Enter = auto-detect[/bright_yellow]): ").strip()
     if custom_group.lower() == 'x':
         console.log("[#ee243e]Conversion is [strike]cancelled[/strike] by user[/#ee243e]")
         return
@@ -589,6 +595,9 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
     if base_name is None:
         console.print("\n[bold yellow] Name each group individually:[/bold yellow]\n")
         for group_name in groups.keys():
+            console.print(f"[bold #eda90c]Group '{group_name}'[/bold #eda90c] contains:")
+            for pdf in groups[group_name]:
+                console.print(f"  [#FF8C42]-{pdf.name}[/#FF8C42]")
             while True:
                 custom_base = console.input(f"[bold cyan]Base name for group[/bold cyan] [bold #eda90c]'{group_name}'[/bold #eda90c] ([#74c7ec]max 22 chars[/#74c7ec]): ").strip()
                 if not custom_base:
@@ -689,7 +698,7 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
 
             leftover = find_leftover_gutenberg_mentions(final_text)
             if leftover:
-                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time(s) after cleaning -- review before publishing:")
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time after cleaning. review before publishing:")
                 for line in leftover[:5]:
                     console.log(f"  [dim]{line[:100]}[/dim]")
 
@@ -727,5 +736,5 @@ if __name__ == "__main__":
     if naming_choice == 'y':
         convert_folder(input_folder, base_name=None)  # Individual naming
     else:
-        base_name = get_base_name()  # Global naming
+        base_name = get_base_name(todo_files)  # Global naming, shows what it applies to
         convert_folder(input_folder, base_name)

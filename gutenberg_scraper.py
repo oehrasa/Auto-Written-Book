@@ -30,17 +30,37 @@ Two compliance details this script handles automatically:
    find_leftover_gutenberg_mentions() (shared with pdf_to_txt_converter.py)
    double-checks nothing else survived before this writes/publishes.
 
-This script must live in the SAME folder as pdf_to_txt_converter.py
-it imports that module directly to reuse clean_text(), limit_blank_lines(),
+Every outbound request (the offline-catalog download and every book
+download attempt, mirror or fallback) goes through _get() /
+_get_with_retries(), which always attaches REQUEST_HEADERS there's a
+single choke point for the User-Agent rather than a header set ad hoc per
+call, so nothing here can accidentally go out with the bare urllib default.
+
+Gutendex specifically is the one exception: it's fronted by Cloudflare, and
+testing showed Python's urllib reliably gets its response body silently
+withheld until the socket read times out, on the exact same URL where curl
+(same machine, same network, any User-Agent) gets a clean 200 in well
+under a second. That's the signature of Cloudflare fingerprinting the TLS
+handshake itself rather than any header - Python's default TLS client
+looks distinct from curl's/a browser's, and gets tarpitted instead of
+outright rejected. Since curl demonstrably gets through, search_gutendex()
+shells out to curl instead of trying to out-fingerprint Cloudflare in pure
+Python. Everything else (mirror downloads, the offline catalog) isn't
+behind that same wall and keeps using urllib via _get()/_get_with_retries().
+
+This script must live in the SAME folder as pdfcon.py (imported below as
+`conv`) as it reuses clean_text(), limit_blank_lines(),
 find_leftover_gutenberg_mentions(), build_manifest(), write_manifest(),
-publish_to_github(), and the shared DATA_REPO_DIR / console / rainbow
-setup, so the two scripts never drift out of sync on cleaning rules or
-manifest format.
+publish_to_github(), derive_group_name(), and the shared DATA_REPO_DIR /
+console / rainbow setup, so the two scripts never drift out of sync on
+cleaning rules, manifest format, or group-naming logic.
 """
 import csv
 import gzip
 import json
 import re
+import shutil
+import subprocess
 import time
 import urllib.request
 import urllib.parse
@@ -111,9 +131,33 @@ def _get_with_retries(url: str, timeout: int, retries: int = 3, backoff: float =
 
 
 # Gutendex path
+def _get_via_curl(url: str, timeout: int) -> bytes:
+    """
+    Fetches a URL by shelling out to curl instead of urllib.
+    """
+    if shutil.which("curl") is None:
+        raise FileNotFoundError("curl is not installed or not on PATH")
+    result = subprocess.run(
+        ["curl", "-sS", "-L", "-m", str(timeout), "-A", REQUEST_HEADERS["User-Agent"], url],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"curl exited {result.returncode}: {result.stderr.decode('utf-8', 'replace').strip()}")
+    return result.stdout
+
+
 def search_gutendex(query: str) -> list[dict]:
     url = f"{GUTENDEX_BASE}?search={urllib.parse.quote(query)}"
-    data = json.loads(_get_with_retries(url, timeout=20, retries=2).decode("utf-8"))
+    try:
+        raw = _get_via_curl(url, timeout=20)
+    except FileNotFoundError:
+        # No curl on this machine which fall back to urllib, even though
+        # it's the one known to get tarpitted by Cloudflare here, so a
+        # missing curl install doesn't crash the whole search.
+        console.log("[dim yellow]curl not found, using urllib for Gutendex (may hang/timeout behind Cloudflare)...[/dim yellow]")
+        raw = _get_with_retries(url, timeout=20, retries=2)
+    data = json.loads(raw.decode("utf-8"))
     return data.get("results", [])
 
 
@@ -215,7 +259,7 @@ def show_results(results: list[dict], saved_ids: set[str]) -> None:
     table = Table(title="Search results")
     table.add_column("#", style="bold")
     table.add_column("Title")
-    table.add_column("Author(s)")
+    table.add_column("Author")
     table.add_column("Gutenberg ID")
     table.add_column("Status")
 
@@ -259,7 +303,7 @@ def run():
     show_results(results, saved_ids)
 
     choice_input = console.input(
-        "\n[#b5e3fb]Enter number(s) to download[/#b5e3fb] ([bright_yellow]comma-separated, blank = cancel[/bright_yellow]): "
+        "\n[#b5e3fb]Enter numbers to download[/#b5e3fb] ([bright_yellow]comma-separated, blank = cancel[/bright_yellow]): "
     ).strip()
     if not choice_input:
         return
@@ -275,74 +319,105 @@ def run():
         console.log("[#b43cb8]No valid selections.[/#b43cb8]")
         return
 
-    group_name = console.input(
-        "[#cf2c2f]Group/series name[/#cf2c2f] for these book(s) (folder they'll be published under): "
+    # Show exactly what's about to be named/grouped, instead of the group
+    # and base-name prompts below floating with no context.
+    console.print("\n[bold #74c7ec]Selected for download:[/bold #74c7ec]")
+    for book in selected:
+        authors = ", ".join(a.get("name", "?") for a in book.get("authors", [])) or "Unknown"
+        console.print(f"  [#FF8C42]-{book.get('title', '?')}[/#FF8C42] [dim]by {authors}[/dim] (Gutenberg #{book['id']})")
+
+    custom_group = console.input(
+        "\n[#cf2c2f]Group/series name[/#cf2c2f] for the books listed above "
+        "([bright_yellow]blank = auto-detect per title, X = exit[/bright_yellow]): "
     ).strip()
-    if not group_name:
-        console.log("[italic red]Group name cannot be empty, cancelling.[/italic red]")
+    if custom_group.lower() == "x":
+        console.log("[#ee243e]Conversion is [strike]cancelled[/strike] by user[/#ee243e]")
         return
 
-    base_name = console.input(f"[bold cyan]Base name[/bold cyan] for group '{group_name}' (max 22 chars): ").strip()
-    if not base_name or len(base_name) > 22:
-        console.log("[bold bright_red]Invalid base name (empty or over 22 chars), cancelling.[/bold bright_red]")
-        return
+    # Group either by the single name the user gave, or per-title
+    # auto-detection.
+    groups: dict[str, list[dict]] = {}
+    for book in selected:
+        title = book.get("title", "?")
+        group_name = custom_group if custom_group else conv.derive_group_name(title)
+        groups.setdefault(group_name, []).append(book)
 
-    output_path = conv.DATA_REPO_DIR / group_name
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    existing_volumes = sorted(output_path.glob(f"{re.escape(base_name)} V*P.txt"))
-    next_volume = len(existing_volumes) + 1
+    group_base_names = {}
+    for group_name, books_in_group in groups.items():
+        console.print(f"\n[bold #eda90c]Group '{group_name}'[/bold #eda90c] contains:")
+        for book in books_in_group:
+            console.print(f"  [#FF8C42]-{book.get('title', '?')}[/#FF8C42] (Gutenberg #{book['id']})")
+        while True:
+            base_name = console.input(
+                f"[bold cyan]Base name[/bold cyan] for group [bold #eda90c]'{group_name}'[/bold #eda90c] ([#74c7ec]max 22 chars[/#74c7ec]): "
+            ).strip()
+            if not base_name:
+                console.log("[italic red]Base name cannot be empty[/italic red]")
+                continue
+            if len(base_name) > 22:
+                console.log("[bold bright_red]Base name should not be more than 22 characters[/bold bright_red]")
+                continue
+            group_base_names[group_name] = base_name
+            break
 
     downloaded_any = False
-    for i, book in enumerate(selected):
-        gid = str(book["id"])
-        title = book.get("title", "?")
+    for group_name, books_in_group in groups.items():
+        output_path = conv.DATA_REPO_DIR / group_name
+        output_path.mkdir(parents=True, exist_ok=True)
+        base_name = group_base_names[group_name]
 
-        if gid in saved_ids:
-            console.log(f"[yellow][SKIP][/yellow] '{title}' (Gutenberg #{gid}) already downloaded before")
-            continue
+        existing_volumes = sorted(output_path.glob(f"{re.escape(base_name)} V*P.txt"))
+        next_volume = len(existing_volumes) + 1
 
-        if source == "gutendex":
-            text_url = pick_plain_text_url(book.get("formats", {}))
-            candidates = [text_url] if text_url else []
-        else:
-            candidates = catalog_url_candidates(gid)
+        for i, book in enumerate(books_in_group):
+            gid = str(book["id"])
+            title = book.get("title", "?")
 
-        if not candidates:
-            console.log(f"[dim yellow]No plain-text format available for[/dim yellow] '{title}', skipping")
-            continue
-
-        console.log(f"[#fee048]Downloading[/#fee048]: [#FF8C42]{title}[/#FF8C42] (Gutenberg #{gid})")
-        try:
-            raw_text = download_text_trying_candidates(candidates)
-        except Exception as e:
-            console.log(f"[dim dark_red]Download failed for '{title}':[/dim dark_red] {e}")
-            continue
-
-        cleaned = conv.clean_text(raw_text)
-        final_text = conv.limit_blank_lines(cleaned, max_blank=1)
-
-        leftover = conv.find_leftover_gutenberg_mentions(final_text)
-        if leftover:
-            console.log(f"[bold yellow]Warning:[/bold yellow] '{title}' still mentions 'Gutenberg' {len(leftover)} time(s) after cleaning | review before publishing:")
-            for line in leftover[:5]:
-                console.log(f"  [dim]{line[:100]}[/dim]")
-            proceed = console.input("  [#b5e3fb]Save anyway?[/#b5e3fb] ([bold #71bc18]Y[/bold #71bc18]/[#ffdb4f]N[/#ffdb4f]): ").strip().lower()
-            if proceed != "y":
-                console.log(f"[dim bright_black]Skipped '{title}'.[/dim bright_black]")
+            if gid in saved_ids:
+                console.log(f"[yellow][SKIP][/yellow] '{title}' (Gutenberg #{gid}) already downloaded before")
                 continue
 
-        volume_num = next_volume + i
-        txt_filename = f"{base_name} V{volume_num}P.txt"
-        txt_path = output_path / txt_filename
-        txt_path.write_text(final_text, encoding="utf-8")
+            if source == "gutendex":
+                text_url = pick_plain_text_url(book.get("formats", {}))
+                candidates = [text_url] if text_url else []
+            else:
+                candidates = catalog_url_candidates(gid)
 
-        mark_saved(gid)
-        saved_ids.add(gid)
-        downloaded_any = True
-        console.log(f"[#aae965]Saved[/#aae965] -> {txt_path}")
+            if not candidates:
+                console.log(f"[dim yellow]No plain-text format available for[/dim yellow] '{title}', skipping")
+                continue
 
-        time.sleep(DOWNLOAD_DELAY_SECONDS)
+            console.log(f"[#fee048]Downloading[/#fee048]: [#FF8C42]{title}[/#FF8C42] (Gutenberg #{gid}) [dim]-> group '{group_name}'[/dim]")
+            try:
+                raw_text = download_text_trying_candidates(candidates)
+            except Exception as e:
+                console.log(f"[dim dark_red]Download failed for '{title}':[/dim dark_red] {e}")
+                continue
+
+            cleaned = conv.clean_text(raw_text)
+            final_text = conv.limit_blank_lines(cleaned, max_blank=1)
+
+            leftover = conv.find_leftover_gutenberg_mentions(final_text)
+            if leftover:
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{title}' still mentions 'Gutenberg' {len(leftover)} time after cleaning | review before publishing:")
+                for line in leftover[:5]:
+                    console.log(f"  [dim]{line[:100]}[/dim]")
+                proceed = console.input("  [#b5e3fb]Save anyway?[/#b5e3fb] ([bold #71bc18]Y[/bold #71bc18]/[#ffdb4f]N[/#ffdb4f]): ").strip().lower()
+                if proceed != "y":
+                    console.log(f"[dim bright_black]Skipped '{title}'.[/dim bright_black]")
+                    continue
+
+            volume_num = next_volume + i
+            txt_filename = f"{base_name} V{volume_num}P.txt"
+            txt_path = output_path / txt_filename
+            txt_path.write_text(final_text, encoding="utf-8")
+
+            mark_saved(gid)
+            saved_ids.add(gid)
+            downloaded_any = True
+            console.log(f"[#aae965]Saved[/#aae965] -> {txt_path}")
+
+            time.sleep(DOWNLOAD_DELAY_SECONDS)
 
     if not downloaded_any:
         console.log("[dim bright_black]Nothing new downloaded, skipping manifest publish.[/dim bright_black]")
