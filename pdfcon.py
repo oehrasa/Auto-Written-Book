@@ -504,6 +504,35 @@ def get_pdf_group_name(pdf_name):
     """Group PDFs by series name while avoiding per-volume numeric subfolders."""
     return derive_group_name(pdf_name.stem)
 
+def metadata_path_for(txt_path: Path) -> Path:
+    """Sidecar metadata file for a given book .txt -- same folder, same stem, .meta.json suffix."""
+    return txt_path.with_name(txt_path.stem + ".meta.json")
+
+def write_book_metadata(txt_path: Path, metadata: dict):
+    """
+    Writes a small sidecar JSON next to a book's .txt file
+
+    build_manifest() reads this automatically if present; a .txt with no
+    matching sidecar (anything converted before this existed, or a
+    plain PDF conversion with no known author) just falls back to the
+    old filename-derived title.
+    """
+    meta_path = metadata_path_for(txt_path)
+    # Only record what's actually known. an empty/None field is omitted
+    # rather than written as null, so callers can just check truthiness.
+    clean = {k: v for k, v in metadata.items() if v}
+    meta_path.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def read_book_metadata(txt_path: Path) -> dict:
+    """Reads the sidecar written by write_book_metadata(), or {} if there isn't one / it's unreadable."""
+    meta_path = metadata_path_for(txt_path)
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
 def build_manifest(repo_root: Path) -> list[dict]:
     """
     Walks the group folders under repo_root and rebuilds the manifest from
@@ -515,12 +544,22 @@ def build_manifest(repo_root: Path) -> list[dict]:
         for txt_file in sorted(group_dir.glob("*.txt")):
             relative = f"{group_dir.name}/{txt_file.name}"
             url = f"{GITHUB_PAGES_BASE}/{quote(relative)}"
-            entries.append({
+            entry = {
                 "group": group_dir.name,
                 "title": txt_file.stem,
                 "file": relative,
                 "url": url,
-            })
+            }
+            meta = read_book_metadata(txt_file)
+            if meta.get("title"):
+                entry["book_title"] = meta["title"]
+            if meta.get("author"):
+                entry["author"] = meta["author"]
+            if meta.get("source"):
+                entry["source"] = meta["source"]
+            if meta.get("gutenberg_id"):
+                entry["gutenberg_id"] = meta["gutenberg_id"]
+            entries.append(entry)
     return entries
 
 def write_manifest(entries: list[dict]):
@@ -529,7 +568,7 @@ def write_manifest(entries: list[dict]):
         "books": entries,
     }
     MANIFEST_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    console.log(f"[#aae965]Wrote manifest[/#aae965] with [#74c7ec]{len(entries)}[/#74c7ec] books to [underline]{MANIFEST_PATH.name}[/underline]")
+    console.log(f"[#aae965]Wrote manifest[/#aae965] with [#74c7ec]{len(entries)}[/#74c7ec] book(s) to [underline]{MANIFEST_PATH.name}[/underline]")
 
 def git_publish(repo_root: Path):
     """Commits and pushes the new/changed .txt files and index.json. Best-effort -- prints and continues on failure."""
@@ -698,7 +737,7 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
 
             leftover = find_leftover_gutenberg_mentions(final_text)
             if leftover:
-                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time after cleaning. review before publishing:")
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time after cleaning, review before publishing! :")
                 for line in leftover[:5]:
                     console.log(f"  [dim]{line[:100]}[/dim]")
 

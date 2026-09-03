@@ -152,7 +152,7 @@ def search_gutendex(query: str) -> list[dict]:
     try:
         raw = _get_via_curl(url, timeout=20)
     except FileNotFoundError:
-        # No curl on this machine which fall back to urllib, even though
+        # No curl on this machine then fall back to urllib, even though
         # it's the one known to get tarpitted by Cloudflare here, so a
         # missing curl install doesn't crash the whole search.
         console.log("[dim yellow]curl not found, using urllib for Gutendex (may hang/timeout behind Cloudflare)...[/dim yellow]")
@@ -399,7 +399,7 @@ def run():
 
             leftover = conv.find_leftover_gutenberg_mentions(final_text)
             if leftover:
-                console.log(f"[bold yellow]Warning:[/bold yellow] '{title}' still mentions 'Gutenberg' {len(leftover)} time after cleaning | review before publishing:")
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{title}' still mentions 'Gutenberg' {len(leftover)} time after cleaning | review before publishing! :")
                 for line in leftover[:5]:
                     console.log(f"  [dim]{line[:100]}[/dim]")
                 proceed = console.input("  [#b5e3fb]Save anyway?[/#b5e3fb] ([bold #71bc18]Y[/bold #71bc18]/[#ffdb4f]N[/#ffdb4f]): ").strip().lower()
@@ -411,6 +411,14 @@ def run():
             txt_filename = f"{base_name} V{volume_num}P.txt"
             txt_path = output_path / txt_filename
             txt_path.write_text(final_text, encoding="utf-8")
+
+            author = ", ".join(a.get("name", "?") for a in book.get("authors", [])) or None
+            conv.write_book_metadata(txt_path, {
+                "source": "gutenberg",
+                "gutenberg_id": gid,
+                "title": title,
+                "author": author,
+            })
 
             mark_saved(gid)
             saved_ids.add(gid)
