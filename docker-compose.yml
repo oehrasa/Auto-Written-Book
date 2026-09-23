@@ -1,0 +1,39 @@
+services:
+  # Run any of the three with: docker compose run --rm converter <script>.py
+  converter:
+    build: .
+    stdin_open: true   # these scripts use console.input(), so -it / equivalent is required
+    tty: true
+    environment:
+      - ASHURBANIPAL_REPO=/data/Ashurbanipal
+      # Forward the host SSH agent so `git push` authenticates over SSH
+      # without the container ever seeing a private key
+      - SSH_AUTH_SOCK=/ssh-agent
+      # The image has no GPG key, so commit signing (gpgsign=true in
+      # ~/.gitconfig) would silently abort git_publish(). Sign from your
+      # host instead; in-container commits are unsigned.
+      - GIT_CONFIG_COUNT=1
+      - GIT_CONFIG_KEY_0=commit.gpgsign
+      - GIT_CONFIG_VALUE_0=false
+    volumes:
+      # Source PDFs pdfcon.py reads from
+      - ./input_folder:/app/input_folder
+
+      # The separate Ashurbanipal clone that gets written to + pushed.
+      # Relative to this file, portable across machines.
+      - ../Ashurbanipal:/data/Ashurbanipal:U
+
+      # State files that must persist across runs/rebuilds. `touch` them on
+      # the host first if they don't exist yet, Docker will otherwise
+      # bind-mount them in as empty *directories* instead of files.
+      - ./Saved_list.txt:/app/Saved_list.txt
+      - ./Saved_gutenberg_list.txt:/app/Saved_gutenberg_list.txt
+      - ./pg_catalog_cache.csv:/app/pg_catalog_cache.csv
+
+      # Git identity (name/email for commit authorship) + host-key
+      # verification only. No key material, no credential store.
+      - ~/.gitconfig:/home/appuser/.gitconfig:ro
+      - ~/.ssh/known_hosts:/home/appuser/.ssh/known_hosts:ro
+
+      # The host SSH agent socket, forwarded read-only for `git push`.
+      - ${SSH_AUTH_SOCK:?Start an SSH agent and load your key (ssh-add)}:/ssh-agent

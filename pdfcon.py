@@ -513,12 +513,12 @@ def write_book_metadata(txt_path: Path, metadata: dict):
     Writes a small sidecar JSON next to a book's .txt file
 
     build_manifest() reads this automatically if present; a .txt with no
-    matching sidecar (anything converted before this existed, or a
+    matching sidecar (e.g. anything converted before this existed, or a
     plain PDF conversion with no known author) just falls back to the
-    old filename-derived title.
+    old filename-derived title, same as always.
     """
     meta_path = metadata_path_for(txt_path)
-    # Only record what's actually known. an empty/None field is omitted
+    # Only record what's actually known, an empty/None field is omitted
     # rather than written as null, so callers can just check truthiness.
     clean = {k: v for k, v in metadata.items() if v}
     meta_path.write_text(json.dumps(clean, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -538,6 +538,12 @@ def build_manifest(repo_root: Path) -> list[dict]:
     Walks the group folders under repo_root and rebuilds the manifest from
     what's actually on disk (rather than just what was converted this run),
     so index.json always reflects the full library.
+
+    "title" stays the old filename derived label (folder-safe, always
+    present) for backward compatibility. Where a metadata sidecar exists
+    (see write_book_metadata()), "book_title" and/or "author" are added
+    alongside it with the real title/author, index.html
+    can prefer those when present and fall back to "title" otherwise.
     """
     entries = []
     for group_dir in sorted(p for p in repo_root.iterdir() if p.is_dir() and not p.name.startswith('.')):
@@ -579,12 +585,31 @@ def git_publish(repo_root: Path):
         if result.returncode != 0 and "nothing to commit" not in result.stdout.lower():
             console.log(f"[dim yellow]git commit:[/dim yellow] {result.stdout.strip()} {result.stderr.strip()}")
             return
-        subprocess.run(["git", "-C", str(repo_root), "push", "origin", GITHUB_BRANCH], check=True)
+        push_result = subprocess.run(
+            ["git", "-C", str(repo_root), "push", "origin", GITHUB_BRANCH],
+            capture_output=True, text=True,
+        )
+        if push_result.returncode != 0:
+            stderr = push_result.stderr.strip()
+            console.log(f"[dim dark_red]git push failed in[/dim dark_red] [underline]{repo_root}[/underline]:")
+            console.log(f"[dim]{stderr}[/dim]")
+            if "rejected" in stderr.lower() or "fetch first" in stderr.lower() or "non-fast-forward" in stderr.lower():
+                console.log(
+                    "[bold yellow]The remote has commits you don't have locally.[/bold yellow] "
+                    f"Your commit is safe, run these in [underline]{repo_root}[/underline] (not wherever this script's code lives):"
+                )
+                console.log(f"[dim]  git -C {repo_root} pull origin {GITHUB_BRANCH}[/dim]")
+                console.log(f"[dim]  git -C {repo_root} push origin {GITHUB_BRANCH}[/dim]")
+                console.log(
+                    "[dim]If that pull conflicts on index.json, take either side (it's fully regenerated anyway), "
+                    "commit, then re-run this script's manifest build/publish step before pushing again.[/dim]"
+                )
+            return
         console.log("[#aae965]Pushed to GitHub.[/#aae965] Pages will redeploy in a minute or two.")
     except FileNotFoundError:
-        console.log("[dim dark_red]git is not installed or not on PATH -- push manually.[/dim dark_red]")
+        console.log("[dim dark_red]git is not installed or not on path.  push manually.[/dim dark_red]")
     except subprocess.CalledProcessError as e:
-        console.log(f"[dim dark_red]git command failed:[/dim dark_red] {e}")
+        console.log(f"[dim dark_red]git command failed in[/dim dark_red] [underline]{repo_root}[/underline]: {e}")
 
 def publish_to_github(repo_root: Path):
     entries = build_manifest(repo_root)
@@ -594,7 +619,7 @@ def publish_to_github(repo_root: Path):
     if choice == "y":
         git_publish(repo_root)
     else:
-        console.log("[dim bright_black]Skipped push, run git add/commit/push manually when ready.[/dim bright_black]")
+        console.log("[dim bright_black]Skipped push -- run git add/commit/push manually when ready.[/dim bright_black]")
 
 def convert_folder(input_dir, base_name=None):  # Make base_name optional
     pdf_files = sorted(
@@ -737,7 +762,7 @@ def convert_folder(input_dir, base_name=None):  # Make base_name optional
 
             leftover = find_leftover_gutenberg_mentions(final_text)
             if leftover:
-                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time after cleaning, review before publishing! :")
+                console.log(f"[bold yellow]Warning:[/bold yellow] '{txt_filename}' still mentions 'Gutenberg' {len(leftover)} time(s) after cleaning -- review before publishing:")
                 for line in leftover[:5]:
                     console.log(f"  [dim]{line[:100]}[/dim]")
 
